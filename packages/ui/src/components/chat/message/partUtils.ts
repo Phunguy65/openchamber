@@ -12,11 +12,10 @@ export const normalizeParts = (parts: Part[]): Part[] => {
 
 export const extractTextContent = (part: Part): string => {
     const partWithText = part as PartWithText;
-    const rawText = partWithText.text;
-    if (typeof rawText === 'string') {
-        return rawText;
-    }
-    return partWithText.content || partWithText.value || '';
+    const candidates = [partWithText.text, partWithText.content, partWithText.value]
+        .filter((candidate): candidate is string => typeof candidate === 'string');
+
+    return candidates.reduce((best, candidate) => (candidate.length > best.length ? candidate : best), '');
 };
 
 export const isEmptyTextPart = (part: Part): boolean => {

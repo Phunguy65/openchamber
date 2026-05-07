@@ -66,9 +66,42 @@ describe('settings helpers', () => {
     });
   });
 
-  it('rejects invalid mobileKeyboardMode values', () => {
+  it('sanitizes chat translation settings and hides missing fields behind disabled defaults', () => {
     const helpers = createTestHelpers();
 
-    expect(helpers.sanitizeSettingsUpdate({ mobileKeyboardMode: 'fixed-layout' })).toEqual({});
+    expect(helpers.formatSettingsResponse({}).chatTranslation).toEqual({ enabled: false });
+    expect(helpers.sanitizeSettingsUpdate({
+      chatTranslation: {
+        enabled: true,
+        targetLanguage: ' Vietnamese ',
+        customTargetLanguage: ' Technical Vietnamese ',
+        providerID: ' anthropic ',
+        modelID: ' claude-sonnet-4 ',
+        systemPrompt: ' Translate carefully ',
+      },
+    })).toEqual({
+      chatTranslation: {
+        enabled: true,
+        targetLanguage: 'Vietnamese',
+        customTargetLanguage: 'Technical Vietnamese',
+        providerID: 'anthropic',
+        modelID: 'claude-sonnet-4',
+        systemPrompt: 'Translate carefully',
+      },
+    });
+  });
+
+  it('rejects invalid chat translation fields and oversized prompts', () => {
+    const helpers = createTestHelpers();
+
+    expect(helpers.sanitizeSettingsUpdate({
+      chatTranslation: {
+        enabled: 'true',
+        targetLanguage: '',
+        providerID: 123,
+        modelID: null,
+        systemPrompt: 'x'.repeat(20_001),
+      },
+    })).toEqual({});
   });
 });

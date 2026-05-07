@@ -10,6 +10,7 @@ import { registerProjectIconRoutes } from './project-icon-routes.js';
 import { registerScheduledTaskRoutes } from '../scheduled-tasks/routes.js';
 import { registerSkillRoutes } from './skill-routes.js';
 import { registerOpenCodeRoutes } from './routes.js';
+import { registerChatTranslationRoutes } from '../chat-translation/routes.js';
 
 export const createFeatureRoutesRuntime = (dependencies) => {
   const {
@@ -82,6 +83,12 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       getProviderSources,
       removeProviderConfig,
       refreshOpenCodeAfterConfigChange,
+    });
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated,
+      buildOpenCodeUrl,
+      getOpenCodeAuthHeaders,
     });
 
     registerProjectIconRoutes(app, {

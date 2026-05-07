@@ -37,6 +37,15 @@ export type ManagedRemoteTunnelPreset = {
   hostname: string;
 };
 
+export type ChatTranslationSettings = {
+  enabled?: boolean;
+  targetLanguage?: string;
+  customTargetLanguage?: string;
+  providerID?: string;
+  modelID?: string;
+  systemPrompt?: string;
+};
+
 export type DesktopSettings = {
   themeId?: string;
   useSystemTheme?: boolean;
@@ -137,6 +146,7 @@ export type DesktopSettings = {
   stickyUserHeader?: boolean;
   wideChatLayoutEnabled?: boolean;
   showSplitAssistantMessageActions?: boolean;
+  chatTranslation?: ChatTranslationSettings;
   fontSize?: number;
   terminalFontSize?: number;
   uiFont?: string;
