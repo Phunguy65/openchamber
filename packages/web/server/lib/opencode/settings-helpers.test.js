@@ -69,10 +69,11 @@ describe('settings helpers', () => {
   it('sanitizes chat translation settings and hides missing fields behind disabled defaults', () => {
     const helpers = createTestHelpers();
 
-    expect(helpers.formatSettingsResponse({}).chatTranslation).toEqual({ enabled: false });
+    expect(helpers.formatSettingsResponse({}).chatTranslation).toEqual({ enabled: false, autoTranslate: false });
     expect(helpers.sanitizeSettingsUpdate({
       chatTranslation: {
         enabled: true,
+        autoTranslate: false,
         targetLanguage: ' Vietnamese ',
         customTargetLanguage: ' Technical Vietnamese ',
         providerID: ' anthropic ',
@@ -82,6 +83,7 @@ describe('settings helpers', () => {
     })).toEqual({
       chatTranslation: {
         enabled: true,
+        autoTranslate: false,
         targetLanguage: 'Vietnamese',
         customTargetLanguage: 'Technical Vietnamese',
         providerID: 'anthropic',
@@ -97,11 +99,21 @@ describe('settings helpers', () => {
     expect(helpers.sanitizeSettingsUpdate({
       chatTranslation: {
         enabled: 'true',
+        autoTranslate: 'false',
         targetLanguage: '',
         providerID: 123,
         modelID: null,
         systemPrompt: 'x'.repeat(20_001),
       },
     })).toEqual({});
+  });
+
+  it('preserves legacy chat translation settings without forcing auto mode into persisted output', () => {
+    const helpers = createTestHelpers();
+
+    expect(helpers.formatSettingsResponse({ chatTranslation: { enabled: true } }).chatTranslation).toEqual({ enabled: true });
+    expect(helpers.sanitizeSettingsUpdate({ chatTranslation: { enabled: true, autoTranslate: false } })).toEqual({
+      chatTranslation: { enabled: true, autoTranslate: false },
+    });
   });
 });

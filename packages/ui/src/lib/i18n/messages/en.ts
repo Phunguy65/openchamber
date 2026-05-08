@@ -1446,6 +1446,8 @@ export const dict = {
   'chat.messageBody.actions.savingImage': 'Saving image...',
   'chat.messageBody.actions.saveAsImage': 'Save as image',
   'chat.messageBody.actions.saveAsPlan': 'Save as plan',
+  'chat.messageBody.actions.translateManual': 'Translate message',
+  'chat.messageBody.actions.translateManualAria': 'Translate assistant message',
   'chat.messageBody.actions.startNewSession': 'Start new session from this answer',
   'chat.messageBody.actions.startNewMultiRun': 'Start new multi-run from this answer',
   'chat.messageBody.tts.stopSpeaking': 'Stop speaking',

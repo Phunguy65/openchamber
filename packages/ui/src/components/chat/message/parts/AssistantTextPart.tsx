@@ -7,70 +7,39 @@ import { useStreamingTextThrottle } from '../../hooks/useStreamingTextThrottle';
 import { resolveAssistantDisplayText, shouldRenderAssistantText } from './assistantTextVisibility';
 import { streamPerfCount, streamPerfObserve } from '@/stores/utils/streamDebug';
 import { Button } from '@/components/ui/button';
-import type { ChatTranslationSettings, DesktopSettings } from '@/lib/desktop';
+import type { ChatTranslationSettings } from '@/lib/desktop';
 import { useI18n } from '@/lib/i18n';
 import { extractTextContent } from '../partUtils';
 import { shouldCommitTranslationState } from './assistantTranslationState';
+import { CHAT_TRANSLATION_MANUAL_REQUEST_EVENT, type ManualTranslationRequestDetail } from './assistantTranslationEvents';
+import { isAutoTranslationEffectivelyEnabled, isTranslationConfigured } from './assistantTranslationSettings';
+import { cancelSession, scheduleTranslation } from './translationQueue';
+import { clearInflight, createTranslationCacheKey, get, getInflight, set, setInflight, type TranslationState } from './translationCache';
+import { useChatTranslationSettingsShared } from './translationSettingsProvider';
+import { abortSessionTranslations, registerAbortController } from './assistantTranslationAbort';
 
 type PartWithText = Part & { text?: string; content?: string; value?: string; time?: { start?: number; end?: number } };
 
-type TranslationState = {
-    status: 'idle' | 'loading' | 'success' | 'error';
-    translatedText?: string;
-    error?: string;
-    showOriginal: boolean;
-    key?: string;
-};
-
-const translationCache = new Map<string, TranslationState>();
 const settingsKey = (settings: ChatTranslationSettings) => [
     settings.targetLanguage,
     settings.customTargetLanguage,
     settings.providerID,
     settings.modelID,
     settings.systemPrompt,
+    settings.autoTranslate === false ? 'manual' : 'auto',
 ].map((value) => value ?? '').join('\u001f');
 
-const textCacheKey = (text: string): string => `${text.length}:${text}`;
-
-const isTranslationConfigured = (settings?: ChatTranslationSettings) => {
-    if (!settings?.enabled) return false;
-    const language = settings.targetLanguage === 'custom' ? settings.customTargetLanguage : settings.targetLanguage;
-    return Boolean(language?.trim() && settings.providerID?.trim() && settings.modelID?.trim());
-};
-
-const useChatTranslationSettings = () => {
-    const [settings, setSettings] = React.useState<ChatTranslationSettings | undefined>();
-
-    React.useEffect(() => {
-        let cancelled = false;
-        const load = async () => {
-            const response = await fetch('/api/config/settings', { headers: { Accept: 'application/json' } });
-            if (!response.ok) return;
-            const payload = await response.json().catch(() => null) as DesktopSettings | null;
-            if (!cancelled) setSettings(payload?.chatTranslation);
-        };
-        void load();
-        const handler = (event: Event) => {
-            const detail = (event as CustomEvent<DesktopSettings>).detail;
-            setSettings(detail.chatTranslation);
-        };
-        window.addEventListener('openchamber:settings-synced', handler);
-        return () => {
-            cancelled = true;
-            window.removeEventListener('openchamber:settings-synced', handler);
-        };
-    }, []);
-
-    return settings;
-};
+const isAbortError = (error: unknown): boolean => error instanceof DOMException && error.name === 'AbortError';
 
 const useAssistantTranslation = ({ sessionId, messageId, partId, text, isFinalized, isStreaming }: { sessionId?: string; messageId: string; partId: string; text: string; isFinalized: boolean; isStreaming: boolean }) => {
-    const settings = useChatTranslationSettings();
+    const settings = useChatTranslationSettingsShared();
     const configured = isTranslationConfigured(settings);
-    const cacheKey = configured ? `${sessionId ?? ''}:${messageId}:${partId}:${settingsKey(settings!)}:${textCacheKey(text)}` : undefined;
+    const autoTranslate = isAutoTranslationEffectivelyEnabled(settings);
+    const cacheKey = configured ? createTranslationCacheKey({ sessionId, messageId, partId, settingsKey: settingsKey(settings!), text }) : undefined;
     const latestCacheKeyRef = React.useRef(cacheKey);
-    const [state, setState] = React.useState<TranslationState>(() => cacheKey ? translationCache.get(cacheKey) ?? { status: 'idle', showOriginal: false, key: cacheKey } : { status: 'idle', showOriginal: false });
+    const abortControllerRef = React.useRef<AbortController | null>(null);
+    const sessionIdRef = React.useRef(sessionId);
+    const [state, setState] = React.useState<TranslationState>(() => cacheKey ? get(cacheKey) ?? { status: 'idle', showOriginal: false, key: cacheKey } : { status: 'idle', showOriginal: false });
 
     React.useEffect(() => {
         latestCacheKeyRef.current = cacheKey;
@@ -79,22 +48,43 @@ const useAssistantTranslation = ({ sessionId, messageId, partId, text, isFinaliz
     const request = React.useCallback(async () => {
         if (!configured || !cacheKey || !text.trim() || isStreaming || !isFinalized) return;
         const loadingState: TranslationState = { status: 'loading', showOriginal: state.showOriginal, key: cacheKey };
-        translationCache.set(cacheKey, loadingState);
+        set(cacheKey, loadingState);
         setState(loadingState);
+        const existingRequest = getInflight(cacheKey);
         try {
-            const response = await fetch('/api/chat/translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: JSON.stringify({ sessionId, messageId, partId, text }),
-            });
-            const payload = await response.json().catch(() => null) as { translatedText?: string; error?: string } | null;
-            if (!response.ok || !payload?.translatedText) throw new Error(payload?.error || 'Translation failed');
-            const successState: TranslationState = { status: 'success', translatedText: payload.translatedText, showOriginal: false, key: cacheKey };
-            translationCache.set(cacheKey, successState);
+            const translationPromise = existingRequest ?? (() => {
+                const controller = new AbortController();
+                abortControllerRef.current?.abort();
+                abortControllerRef.current = controller;
+                const unregister = registerAbortController(sessionId, controller);
+                const promise = fetch('/api/chat/translate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                    body: JSON.stringify({ sessionId, messageId, partId, text }),
+                    signal: controller.signal,
+                })
+                    .then(async (response) => {
+                        const payload = await response.json().catch(() => null) as { translatedText?: string; error?: string } | null;
+                        if (!response.ok || !payload?.translatedText) throw new Error(payload?.error || 'Translation failed');
+                        return payload.translatedText;
+                    })
+                    .finally(() => {
+                        unregister();
+                        if (abortControllerRef.current === controller) abortControllerRef.current = null;
+                    });
+                return setInflight(cacheKey, promise);
+            })();
+            const translatedText = await translationPromise;
+            const successState: TranslationState = { status: 'success', translatedText, showOriginal: false, key: cacheKey };
+            set(cacheKey, successState);
             if (shouldCommitTranslationState(latestCacheKeyRef.current, cacheKey)) setState(successState);
         } catch (error) {
+            if (isAbortError(error)) {
+                clearInflight(cacheKey);
+                return;
+            }
             const errorState: TranslationState = { status: 'error', error: error instanceof Error ? error.message : 'Translation failed', showOriginal: true, key: cacheKey };
-            translationCache.set(cacheKey, errorState);
+            set(cacheKey, errorState);
             if (shouldCommitTranslationState(latestCacheKeyRef.current, cacheKey)) setState(errorState);
         }
     }, [cacheKey, configured, isFinalized, isStreaming, messageId, partId, sessionId, state.showOriginal, text]);
@@ -104,18 +94,48 @@ const useAssistantTranslation = ({ sessionId, messageId, partId, text, isFinaliz
             setState({ status: 'idle', showOriginal: false });
             return;
         }
-        const cached = translationCache.get(cacheKey);
+        const cached = get(cacheKey);
         if (cached) {
             setState(cached);
             return;
         }
         setState({ status: 'idle', showOriginal: false, key: cacheKey });
-        void request();
-    }, [cacheKey, request]);
+        if (autoTranslate) {
+            const cancel = scheduleTranslation(sessionId ?? '', cacheKey, request);
+            return cancel;
+        }
+    }, [autoTranslate, cacheKey, request, sessionId]);
+
+    React.useEffect(() => {
+        if (sessionIdRef.current === sessionId) return;
+        const previousSessionId = sessionIdRef.current;
+        sessionIdRef.current = sessionId;
+        cancelSession(previousSessionId ?? '');
+        abortSessionTranslations(previousSessionId);
+    }, [sessionId]);
+
+    React.useEffect(() => {
+        return () => {
+            abortControllerRef.current?.abort();
+            abortControllerRef.current = null;
+        };
+    }, []);
+
+    React.useEffect(() => {
+        if (!configured || autoTranslate) return;
+        const handler = (event: Event) => {
+            const detail = (event as CustomEvent<ManualTranslationRequestDetail>).detail;
+            if (detail?.messageId === messageId) {
+                void request();
+            }
+        };
+        window.addEventListener(CHAT_TRANSLATION_MANUAL_REQUEST_EVENT, handler);
+        return () => window.removeEventListener(CHAT_TRANSLATION_MANUAL_REQUEST_EVENT, handler);
+    }, [autoTranslate, configured, messageId, request]);
 
     const toggleOriginal = React.useCallback(() => setState((current) => {
         const next = { ...current, showOriginal: !current.showOriginal };
-        if (cacheKey) translationCache.set(cacheKey, next);
+        if (cacheKey) set(cacheKey, next);
         return next;
     }), [cacheKey]);
 

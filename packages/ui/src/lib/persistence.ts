@@ -532,6 +532,9 @@ const sanitizeChatTranslationSettings = (value: unknown): DesktopSettings['chatT
   if (typeof candidate.enabled === 'boolean') {
     result.enabled = candidate.enabled;
   }
+  if (typeof candidate.autoTranslate === 'boolean') {
+    result.autoTranslate = candidate.autoTranslate;
+  }
 
   const boundedString = (input: unknown, maxLength: number): string | undefined => {
     if (typeof input !== 'string') return undefined;

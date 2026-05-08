@@ -39,6 +39,7 @@ export type ManagedRemoteTunnelPreset = {
 
 export type ChatTranslationSettings = {
   enabled?: boolean;
+  autoTranslate?: boolean;
   targetLanguage?: string;
   customTargetLanguage?: string;
   providerID?: string;

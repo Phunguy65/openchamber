@@ -3,6 +3,7 @@ export const CHAT_TRANSLATION_PROMPT_MAX_LENGTH = 20_000;
 export const CHAT_TRANSLATION_FIELD_MAX_LENGTH = 160;
 export const CHAT_TRANSLATION_POLL_INTERVAL_MS = 1_000;
 export const CHAT_TRANSLATION_TIMEOUT_MS = 120_000;
+export const CHAT_TRANSLATION_CONCURRENCY_LIMIT = 4;
 
 export const DEFAULT_CHAT_TRANSLATION_PROMPT = `You are a technical translation engine. Translate only natural-language prose to the requested target language.
 Preserve markdown structure exactly, including headings, lists, tables, blockquotes, links, and emphasis.
@@ -70,6 +71,38 @@ export const validateChatTranslationRequest = ({ text, settings }) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const CHAT_TRANSLATION_SESSION_TITLE = 'Chat Translation';
+
+export const createCountingSemaphore = (limit) => {
+  let active = 0;
+  const queue = [];
+
+  const release = () => {
+    active -= 1;
+    const next = queue.shift();
+    if (!next) return;
+    active += 1;
+    next(release);
+  };
+
+  return {
+    acquire: () => new Promise((resolve) => {
+      if (active < limit) {
+        active += 1;
+        resolve(release);
+        return;
+      }
+      queue.push(resolve);
+    }),
+    get active() {
+      return active;
+    },
+    get queued() {
+      return queue.length;
+    },
+  };
+};
+
+const translationSemaphore = createCountingSemaphore(CHAT_TRANSLATION_CONCURRENCY_LIMIT);
 
 const buildOpenCodeRequestHeaders = (getOpenCodeAuthHeaders) => ({
   'Content-Type': 'application/json',
@@ -210,7 +243,9 @@ export const translateWithOpenCode = async ({
     return await pollTranslatedText({ fetchImpl, buildOpenCodeUrl, headers, sessionID, timeoutMs, pollIntervalMs, sleepImpl });
   } finally {
     if (sessionID) {
-      await deleteTemporarySession({ fetchImpl, buildOpenCodeUrl, headers, sessionID }).catch(() => {});
+      await deleteTemporarySession({ fetchImpl, buildOpenCodeUrl, headers, sessionID }).catch((err) => {
+        console.warn('[ChatTranslation] Session cleanup failed:', err?.message);
+      });
     }
   }
 };
@@ -236,7 +271,8 @@ export const registerChatTranslationRoutes = (app, dependencies) => {
     translate = translateWithOpenCode,
   } = dependencies;
 
-  app.post('/api/chat/translate', async (req, res) => {
+  const jsonParser = dependencies.express?.json({ limit: '200kb' });
+  const handlers = [jsonParser, async (req, res) => {
     try {
       const settings = await readSettingsFromDiskMigrated();
       const validation = validateChatTranslationRequest({
@@ -248,16 +284,24 @@ export const registerChatTranslationRoutes = (app, dependencies) => {
         return res.status(validation.status).json({ error: validation.message, code: validation.code });
       }
 
-      const translatedText = await translate({
-        buildOpenCodeUrl,
-        getOpenCodeAuthHeaders,
-        request: validation,
-      });
+      const release = await translationSemaphore.acquire();
+      let translatedText;
+      try {
+        translatedText = await translate({
+          buildOpenCodeUrl,
+          getOpenCodeAuthHeaders,
+          request: validation,
+        });
+      } finally {
+        release();
+      }
 
       return res.json({ translatedText });
     } catch (error) {
       console.error('[ChatTranslation] Translation failed:', error);
       return res.status(502).json({ error: error?.message || 'Translation failed', code: 'translation_failed' });
     }
-  });
+  }].filter(Boolean);
+
+  app.post('/api/chat/translate', ...handlers);
 };

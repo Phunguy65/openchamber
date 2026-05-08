@@ -5,6 +5,7 @@ import request from 'supertest';
 import {
   DEFAULT_CHAT_TRANSLATION_PROMPT,
   buildChatTranslationPrompt,
+  createCountingSemaphore,
   registerChatTranslationRoutes,
   translateWithOpenCode,
   validateChatTranslationRequest,
@@ -138,7 +139,7 @@ describe('chat translation backend', () => {
 
   it('returns deterministic route errors without invoking translation when disabled', async () => {
     const handlers = new Map();
-    const app = { post: (path, handler) => handlers.set(path, handler) };
+    const app = { post: (path, ...handlersForPath) => handlers.set(path, handlersForPath.at(-1)) };
     const translate = vi.fn();
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: { enabled: false } }),
@@ -159,7 +160,7 @@ describe('chat translation backend', () => {
 
   it('returns translated markdown from the route', async () => {
     const handlers = new Map();
-    const app = { post: (path, handler) => handlers.set(path, handler) };
+    const app = { post: (path, ...handlersForPath) => handlers.set(path, handlersForPath.at(-1)) };
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
       buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
@@ -186,6 +187,7 @@ describe('chat translation backend', () => {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
       buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
       getOpenCodeAuthHeaders: () => ({}),
+      express,
       translate,
     });
 
@@ -197,6 +199,76 @@ describe('chat translation backend', () => {
     expect(response.body).toEqual({ translatedText: 'xin chao' });
     expect(response.body.code).not.toBe('invalid_text');
     expect(translate).toHaveBeenCalledOnce();
+  });
+
+  it('rejects oversized translation bodies before invoking translation', async () => {
+    const app = express();
+    const translate = vi.fn(async () => 'xin chao');
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
+      buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      express,
+      translate,
+    });
+
+    const response = await request(app)
+      .post('/api/chat/translate')
+      .send({ text: 'x'.repeat(210 * 1024) });
+
+    expect(response.status).toBe(413);
+    expect(translate).not.toHaveBeenCalled();
+  });
+
+  it('limits semaphore acquisitions and resumes queued work in FIFO order', async () => {
+    const semaphore = createCountingSemaphore(4);
+    const firstReleases = await Promise.all([semaphore.acquire(), semaphore.acquire(), semaphore.acquire(), semaphore.acquire()]);
+    const order = [];
+    const fifth = semaphore.acquire().then((release) => {
+      order.push('fifth');
+      return release;
+    });
+    const sixth = semaphore.acquire().then((release) => {
+      order.push('sixth');
+      return release;
+    });
+
+    expect(semaphore.active).toBe(4);
+    expect(semaphore.queued).toBe(2);
+
+    firstReleases[0]();
+    const fifthRelease = await fifth;
+    expect(order).toEqual(['fifth']);
+    expect(semaphore.active).toBe(4);
+    expect(semaphore.queued).toBe(1);
+
+    firstReleases[1]();
+    const sixthRelease = await sixth;
+    expect(order).toEqual(['fifth', 'sixth']);
+
+    firstReleases[2]();
+    firstReleases[3]();
+    fifthRelease();
+    sixthRelease();
+    expect(semaphore.active).toBe(0);
+  });
+
+  it('releases semaphore slots after failed work', async () => {
+    const semaphore = createCountingSemaphore(1);
+    const release = await semaphore.acquire();
+    const queued = semaphore.acquire();
+
+    try {
+      throw new Error('translation failed');
+    } catch {
+      release();
+    }
+
+    const nextRelease = await queued;
+    expect(semaphore.active).toBe(1);
+    expect(semaphore.queued).toBe(0);
+    nextRelease();
   });
 
   it('creates a temporary session, prompts through prompt_async, polls messages, and returns assistant text', async () => {
@@ -255,6 +327,7 @@ describe('chat translation backend', () => {
   });
 
   it('tolerates cleanup deletion failure after a successful translation', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchImpl = vi.fn(async (url, options = {}) => {
       const path = new URL(url).pathname;
       if (path === '/session' && options.method === 'POST') {
@@ -277,6 +350,8 @@ describe('chat translation backend', () => {
       'http://127.0.0.1:4096/session/translation-session',
       expect.objectContaining({ method: 'DELETE' })
     );
+    expect(warn).toHaveBeenCalledWith('[ChatTranslation] Session cleanup failed:', 'delete failed');
+    warn.mockRestore();
   });
 
   it('attempts cleanup after prompt failure once a session exists', async () => {

@@ -44,6 +44,9 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof value.enabled === 'boolean') {
       result.enabled = value.enabled;
     }
+    if (typeof value.autoTranslate === 'boolean') {
+      result.autoTranslate = value.autoTranslate;
+    }
 
     const targetLanguage = normalizeBoundedString(value.targetLanguage, CHAT_TRANSLATION_LANGUAGE_MAX_LENGTH);
     if (targetLanguage) {
@@ -75,7 +78,7 @@ export const createSettingsHelpers = (dependencies) => {
     return Object.keys(result).length > 0 ? result : undefined;
   };
 
-  const formatChatTranslationSettings = (value) => normalizeChatTranslationSettings(value) ?? { enabled: false };
+  const formatChatTranslationSettings = (value) => normalizeChatTranslationSettings(value) ?? { enabled: false, autoTranslate: false };
 
   const normalizePwaAppName = (value, fallback = '') => {
     if (typeof value !== 'string') {
