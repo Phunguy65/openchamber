@@ -1412,6 +1412,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.messageBody.actions.savingImage": "Збереження зображення...",
   "chat.messageBody.actions.saveAsImage": "Зберегти як зображення",
   "chat.messageBody.actions.saveAsPlan": "Зберегти як план",
+  "chat.messageBody.actions.translateManual": "Перекласти повідомлення",
+  "chat.messageBody.actions.translateManualAria": "Перекласти повідомлення асистента",
   "chat.messageBody.actions.startNewSession": "Почати нову сесію із цієї відповіді",
   "chat.messageBody.actions.startNewMultiRun": "Почніть новий Multi-run із цієї відповіді",
   "chat.messageBody.tts.stopSpeaking": "Зупинити озвучення",

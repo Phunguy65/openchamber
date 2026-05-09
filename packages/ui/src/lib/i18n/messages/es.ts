@@ -1412,6 +1412,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.messageBody.actions.savingImage": "Guardando imagen...",
   "chat.messageBody.actions.saveAsImage": "Guardar como imagen",
   "chat.messageBody.actions.saveAsPlan": "Guardar como plan",
+  "chat.messageBody.actions.translateManual": "Traducir mensaje",
+  "chat.messageBody.actions.translateManualAria": "Traducir mensaje del asistente",
   "chat.messageBody.actions.startNewSession": "Iniciar nueva sesión desde esta respuesta",
   "chat.messageBody.actions.startNewMultiRun": "Iniciar nuevo multi-run desde esta respuesta",
   "chat.messageBody.tts.stopSpeaking": "Dejar de hablar",

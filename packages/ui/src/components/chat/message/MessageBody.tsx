@@ -4,6 +4,7 @@ import type { Part } from '@opencode-ai/sdk/v2';
 import UserTextPart from './parts/UserTextPart';
 import ToolPart from './parts/ToolPart';
 import AssistantTextPart from './parts/AssistantTextPart';
+import { requestManualChatTranslation } from './parts/assistantTranslationEvents';
 import ReasoningPart from './parts/ReasoningPart';
 import { MessageFilesDisplay } from '../FileAttachment';
 import { TurnChangedFilesDropdown } from '../TurnChangedFilesDropdown';
@@ -45,6 +46,8 @@ import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useSessions } from '@/sync/sync-context';
 import { useI18n } from '@/lib/i18n';
 import { extractLoopbackUrls } from '@/lib/url';
+import { isAutoTranslationEffectivelyEnabled, isTranslationConfigured } from './parts/assistantTranslationSettings';
+import { useChatTranslationSettingsShared } from './parts/translationSettingsProvider';
 
 const CONTAIN_LAYOUT_STYLE = { contain: 'layout' as const, transform: 'translateZ(0)' };
 const MESSAGE_FOOTER_CONTAINER_STYLE = { containerType: 'inline-size' as const, containerName: 'message-footer' };
@@ -971,6 +974,13 @@ const AssistantMessageBody = React.memo(({
     }, [visibleParts]);
     const assistantPlanText = React.useMemo(() => flattenAssistantTextParts(assistantTextParts), [assistantTextParts]);
     const suggestedPlanTitle = React.useMemo(() => suggestPlanTitleFromText(assistantPlanText), [assistantPlanText]);
+    const hasFinalizedAssistantText = React.useMemo(() => {
+        return assistantTextParts.some((part) => {
+            const text = extractTextContent(part);
+            const time = (part as { time?: { end?: unknown } }).time;
+            return text.trim().length > 0 && typeof time?.end !== 'undefined';
+        });
+    }, [assistantTextParts]);
 
     const openContextPreview = useUIStore((state) => state.openContextPreview);
 
@@ -1012,6 +1022,7 @@ const AssistantMessageBody = React.memo(({
     const [isSavingPlan, setIsSavingPlan] = React.useState(false);
     const chatRenderMode = useUIStore((state) => state.chatRenderMode);
     const showSplitAssistantMessageActions = useUIStore((state) => state.showSplitAssistantMessageActions);
+    const chatTranslationSettings = useChatTranslationSettingsShared();
     const isSortedRenderMode = chatRenderMode === 'sorted';
     const isMiniChatSurface = chatSurfaceMode === 'mini-chat';
     const collapsedPreviewCount = 7;
@@ -1707,6 +1718,11 @@ const AssistantMessageBody = React.memo(({
     const footerTimestampClassName = 'text-sm text-muted-foreground/60 tabular-nums flex items-center gap-1';
     const isVSCode = isVSCodeRuntime();
     const canOpenMessagePreview = !isMiniChatSurface && !isMobile && !isVSCode;
+    const showManualTranslateAction = isTranslationConfigured(chatTranslationSettings)
+        && !isAutoTranslationEffectivelyEnabled(chatTranslationSettings)
+        && hasFinalizedAssistantText
+        && isLastAssistantInTurn
+        && hasStopFinish;
 
     const finalTurnActionButtons = (
         <>
@@ -1786,6 +1802,31 @@ const AssistantMessageBody = React.memo(({
                         </Button>
                     </TooltipTrigger>
                     <TooltipContent sideOffset={6}>{t('chat.messageBody.actions.startNewMultiRun')}</TooltipContent>
+                </Tooltip>
+            ) : null}
+            {showManualTranslateAction ? (
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-muted-foreground bg-transparent hover:text-foreground hover:!bg-transparent active:!bg-transparent focus-visible:!bg-transparent focus-visible:ring-2 focus-visible:ring-primary/50"
+                            aria-label={t('chat.messageBody.actions.translateManualAria')}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={() => requestManualChatTranslation(messageId)}
+                        >
+                            <RiGlobalLine className="h-4 w-4" />
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={6}>
+                        <span className="flex items-center gap-1.5">
+                            <span>{t('chat.messageBody.actions.translateManual')}</span>
+                            <span className="shrink-0 rounded px-1 pb-px typography-micro leading-none text-[var(--status-warning)] bg-[var(--status-warning)]/10">
+                                {t('settings.view.badge.beta')}
+                            </span>
+                        </span>
+                    </TooltipContent>
                 </Tooltip>
             ) : null}
         </>

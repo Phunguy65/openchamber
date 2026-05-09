@@ -522,6 +522,44 @@ const applyDesktopUiPreferences = (settings: DesktopSettings) => {
   }
 };
 
+const sanitizeChatTranslationSettings = (value: unknown): DesktopSettings['chatTranslation'] | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const result: NonNullable<DesktopSettings['chatTranslation']> = {};
+  if (typeof candidate.enabled === 'boolean') {
+    result.enabled = candidate.enabled;
+  }
+  if (typeof candidate.autoTranslate === 'boolean') {
+    result.autoTranslate = candidate.autoTranslate;
+  }
+
+  const boundedString = (input: unknown, maxLength: number): string | undefined => {
+    if (typeof input !== 'string') return undefined;
+    const trimmed = input.trim();
+    return trimmed.length > 0 ? trimmed.slice(0, maxLength) : undefined;
+  };
+
+  const targetLanguage = boundedString(candidate.targetLanguage, 80);
+  if (targetLanguage) result.targetLanguage = targetLanguage;
+  const customTargetLanguage = boundedString(candidate.customTargetLanguage, 80);
+  if (customTargetLanguage) result.customTargetLanguage = customTargetLanguage;
+  const apiKey = boundedString(candidate.apiKey, 256);
+  if (apiKey) result.apiKey = apiKey;
+  const baseURL = boundedString(candidate.baseURL, 512);
+  if (baseURL) result.baseURL = baseURL;
+  const providerID = boundedString(candidate.providerID, 160);
+  if (providerID) result.providerID = providerID;
+  const modelID = boundedString(candidate.modelID, 160);
+  if (modelID) result.modelID = modelID;
+  const systemPrompt = boundedString(candidate.systemPrompt, 20_000);
+  if (systemPrompt) result.systemPrompt = systemPrompt;
+
+  return Object.keys(result).length > 0 ? result : undefined;
+};
+
 const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   if (!payload || typeof payload !== 'object') {
     return null;
@@ -877,6 +915,10 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   }
   if (typeof candidate.showSplitAssistantMessageActions === 'boolean') {
     result.showSplitAssistantMessageActions = candidate.showSplitAssistantMessageActions;
+  }
+  const chatTranslation = sanitizeChatTranslationSettings(candidate.chatTranslation);
+  if (chatTranslation) {
+    result.chatTranslation = chatTranslation;
   }
   if (typeof candidate.fontSize === 'number' && Number.isFinite(candidate.fontSize)) {
     result.fontSize = candidate.fontSize;

@@ -512,6 +512,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.messageBody.actions.savingImage': 'Zapisywanie obrazu...',
   'chat.messageBody.actions.saveAsImage': 'Zapisz jako obraz',
   'chat.messageBody.actions.saveAsPlan': 'Zapisz jako plan',
+  'chat.messageBody.actions.translateManual': 'Przetłumacz wiadomość',
+  'chat.messageBody.actions.translateManualAria': 'Przetłumacz wiadomość asystenta',
   'chat.messageBody.actions.startNewSession': 'Rozpocznij nową sesję z tej odpowiedzi',
   'chat.messageBody.actions.startNewMultiRun': 'Rozpocznij nowe wielokrotne uruchomienie z tej odpowiedzi',
   'chat.messageBody.tts.stopSpeaking': 'Przestań mówić',

@@ -20,6 +20,77 @@ export const createSettingsHelpers = (dependencies) => {
   const PWA_APP_NAME_MAX_LENGTH = 64;
   const PWA_ORIENTATION_VALUES = new Set(['system', 'portrait', 'landscape']);
   const MOBILE_KEYBOARD_MODE_VALUES = new Set(['native', 'resize-content']);
+  const CHAT_TRANSLATION_LANGUAGE_MAX_LENGTH = 80;
+  const CHAT_TRANSLATION_MODEL_FIELD_MAX_LENGTH = 160;
+  const CHAT_TRANSLATION_API_KEY_MAX_LENGTH = 256;
+  const CHAT_TRANSLATION_BASE_URL_MAX_LENGTH = 512;
+  const CHAT_TRANSLATION_PROMPT_MAX_LENGTH = 20_000;
+
+  const normalizeBoundedString = (value, maxLength) => {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    return trimmed.slice(0, maxLength);
+  };
+
+  const normalizeChatTranslationSettings = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return undefined;
+    }
+
+    const result = {};
+    if (typeof value.enabled === 'boolean') {
+      result.enabled = value.enabled;
+    }
+    if (typeof value.autoTranslate === 'boolean') {
+      result.autoTranslate = value.autoTranslate;
+    }
+
+    const targetLanguage = normalizeBoundedString(value.targetLanguage, CHAT_TRANSLATION_LANGUAGE_MAX_LENGTH);
+    if (targetLanguage) {
+      result.targetLanguage = targetLanguage;
+    }
+
+    const customTargetLanguage = normalizeBoundedString(value.customTargetLanguage, CHAT_TRANSLATION_LANGUAGE_MAX_LENGTH);
+    if (customTargetLanguage) {
+      result.customTargetLanguage = customTargetLanguage;
+    }
+
+    const apiKey = normalizeBoundedString(value.apiKey, CHAT_TRANSLATION_API_KEY_MAX_LENGTH);
+    if (apiKey) {
+      result.apiKey = apiKey;
+    }
+
+    const baseURL = normalizeBoundedString(value.baseURL, CHAT_TRANSLATION_BASE_URL_MAX_LENGTH);
+    if (baseURL) {
+      result.baseURL = baseURL;
+    }
+
+    const providerID = normalizeBoundedString(value.providerID, CHAT_TRANSLATION_MODEL_FIELD_MAX_LENGTH);
+    if (providerID) {
+      result.providerID = providerID;
+    }
+
+    const modelID = normalizeBoundedString(value.modelID, CHAT_TRANSLATION_MODEL_FIELD_MAX_LENGTH);
+    if (modelID) {
+      result.modelID = modelID;
+    }
+
+    if (typeof value.systemPrompt === 'string') {
+      const trimmed = value.systemPrompt.trim();
+      if (trimmed.length > 0 && trimmed.length <= CHAT_TRANSLATION_PROMPT_MAX_LENGTH) {
+        result.systemPrompt = trimmed;
+      }
+    }
+
+    return Object.keys(result).length > 0 ? result : undefined;
+  };
+
+  const formatChatTranslationSettings = (value) => normalizeChatTranslationSettings(value) ?? { enabled: false, autoTranslate: false };
 
   const normalizePwaAppName = (value, fallback = '') => {
     if (typeof value !== 'string') {
@@ -394,6 +465,10 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.showSplitAssistantMessageActions === 'boolean') {
       result.showSplitAssistantMessageActions = candidate.showSplitAssistantMessageActions;
     }
+    const chatTranslation = normalizeChatTranslationSettings(candidate.chatTranslation);
+    if (chatTranslation) {
+      result.chatTranslation = chatTranslation;
+    }
     if (typeof candidate.fontSize === 'number' && Number.isFinite(candidate.fontSize)) {
       result.fontSize = Math.max(50, Math.min(200, Math.round(candidate.fontSize)));
     }
@@ -680,6 +755,7 @@ export const createSettingsHelpers = (dependencies) => {
       securityScopedBookmarks: bookmarks,
       pinnedDirectories: normalizeStringArray(settings.pinnedDirectories),
       typographySizes: sanitizeTypographySizesPartial(settings.typographySizes),
+      chatTranslation: formatChatTranslationSettings(settings.chatTranslation),
       showReasoningTraces:
         typeof settings.showReasoningTraces === 'boolean'
           ? settings.showReasoningTraces

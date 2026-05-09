@@ -1446,6 +1446,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.messageBody.actions.savingImage': '이미지 저장 중…',
   'chat.messageBody.actions.saveAsImage': '이미지로 저장',
   'chat.messageBody.actions.saveAsPlan': '플랜으로 저장',
+  'chat.messageBody.actions.translateManual': '메시지 번역',
+  'chat.messageBody.actions.translateManualAria': '어시스턴트 메시지 번역',
   'chat.messageBody.actions.startNewSession': '이 응답에서 새 세션 시작',
   'chat.messageBody.actions.startNewMultiRun': '이 응답에서 새 멀티런 시작',
   'chat.messageBody.tts.stopSpeaking': '읽기 중지',

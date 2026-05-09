@@ -12,6 +12,7 @@ describe('core-routes', () => {
         shutdownOpts = opts;
       }),
       getHealthSnapshot: () => ({ status: 'ok' }),
+      express,
       openchamberVersion: '1.0.0',
       runtimeName: 'test',
     };
