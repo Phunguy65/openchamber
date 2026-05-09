@@ -51,9 +51,9 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       sanitizeProjects,
       sanitizeSkillCatalogs,
       isUnsafeSkillRelativePath,
+      getOpenCodePort,
       buildOpenCodeUrl,
       getOpenCodeAuthHeaders,
-      getOpenCodePort,
       buildAugmentedPath,
       projectConfigRuntime,
       scheduledTasksRuntime,
@@ -87,8 +87,6 @@ export const createFeatureRoutesRuntime = (dependencies) => {
 
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated,
-      buildOpenCodeUrl,
-      getOpenCodeAuthHeaders,
     });
 
     registerProjectIconRoutes(app, {

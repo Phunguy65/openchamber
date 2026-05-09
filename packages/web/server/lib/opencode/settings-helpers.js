@@ -22,6 +22,8 @@ export const createSettingsHelpers = (dependencies) => {
   const MOBILE_KEYBOARD_MODE_VALUES = new Set(['native', 'resize-content']);
   const CHAT_TRANSLATION_LANGUAGE_MAX_LENGTH = 80;
   const CHAT_TRANSLATION_MODEL_FIELD_MAX_LENGTH = 160;
+  const CHAT_TRANSLATION_API_KEY_MAX_LENGTH = 256;
+  const CHAT_TRANSLATION_BASE_URL_MAX_LENGTH = 512;
   const CHAT_TRANSLATION_PROMPT_MAX_LENGTH = 20_000;
 
   const normalizeBoundedString = (value, maxLength) => {
@@ -56,6 +58,16 @@ export const createSettingsHelpers = (dependencies) => {
     const customTargetLanguage = normalizeBoundedString(value.customTargetLanguage, CHAT_TRANSLATION_LANGUAGE_MAX_LENGTH);
     if (customTargetLanguage) {
       result.customTargetLanguage = customTargetLanguage;
+    }
+
+    const apiKey = normalizeBoundedString(value.apiKey, CHAT_TRANSLATION_API_KEY_MAX_LENGTH);
+    if (apiKey) {
+      result.apiKey = apiKey;
+    }
+
+    const baseURL = normalizeBoundedString(value.baseURL, CHAT_TRANSLATION_BASE_URL_MAX_LENGTH);
+    if (baseURL) {
+      result.baseURL = baseURL;
     }
 
     const providerID = normalizeBoundedString(value.providerID, CHAT_TRANSLATION_MODEL_FIELD_MAX_LENGTH);

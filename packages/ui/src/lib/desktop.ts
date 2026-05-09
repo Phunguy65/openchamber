@@ -42,6 +42,8 @@ export type ChatTranslationSettings = {
   autoTranslate?: boolean;
   targetLanguage?: string;
   customTargetLanguage?: string;
+  apiKey?: string;
+  baseURL?: string;
   providerID?: string;
   modelID?: string;
   systemPrompt?: string;

@@ -1,13 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
+const authMocks = {
+  readAuthFile: vi.fn(),
+  readConfigLayers: vi.fn(),
+};
+
+vi.mock('../opencode/auth.js', () => ({
+  readAuthFile: authMocks.readAuthFile,
+}));
+
+vi.mock('../opencode/shared.js', () => ({
+  readConfigLayers: authMocks.readConfigLayers,
+}));
+
 import {
+  CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
   DEFAULT_CHAT_TRANSLATION_PROMPT,
   buildChatTranslationPrompt,
   createCountingSemaphore,
+  fetchChatTranslationModels,
   registerChatTranslationRoutes,
-  translateWithOpenCode,
+  translateWithOpenAI,
   validateChatTranslationRequest,
 } from './routes.js';
 import { registerCommonRequestMiddleware } from '../opencode/core-routes.js';
@@ -28,71 +43,34 @@ const translationRequest = {
   systemPrompt: 'Translate to Vietnamese.\n\nTarget language: Vietnamese',
 };
 
-const jsonResponse = (payload, init = {}) => ({
-  ok: init.ok ?? true,
-  status: init.status ?? 200,
-  json: vi.fn(async () => payload),
-  text: vi.fn(async () => typeof payload === 'string' ? payload : JSON.stringify(payload)),
-});
-
-const expectSessionCreationRequest = (options) => {
-  expect(options).toMatchObject({
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      authorization: 'Bearer test-token',
-    },
-  });
-  expect(JSON.parse(options.body)).toEqual({ title: 'Chat Translation' });
+const createOpenAIClient = (createImpl = vi.fn(async () => ({ choices: [{ message: { content: '**Xin chào**' } }] }))) => {
+  const OpenAIClient = vi.fn().mockImplementation((options) => ({
+    options,
+    chat: { completions: { create: createImpl } },
+  }));
+  return { OpenAIClient, createImpl };
 };
 
-const createOpenCodeFetch = ({ messages, promptResponse = {}, sessionResponse = { id: 'translation-session' } }) => {
-  const fetchImpl = vi.fn(async (url, options = {}) => {
-    const path = new URL(url).pathname;
-    if (path === '/session' && options.method === 'POST') {
-      expectSessionCreationRequest(options);
-      return jsonResponse(sessionResponse);
-    }
-    if (path === '/session/translation-session/prompt_async' && options.method === 'POST') {
-      return jsonResponse(promptResponse);
-    }
-    if (path === '/session/translation-session/message' && options.method === 'GET') {
-      const nextMessages = typeof messages === 'function' ? messages() : messages;
-      return jsonResponse(nextMessages);
-    }
-    if (path === '/session/translation-session' && options.method === 'DELETE') {
-      return jsonResponse({ ok: true });
-    }
-    throw new Error(`Unexpected request: ${options.method || 'GET'} ${url}`);
-  });
-
-  return fetchImpl;
+const createOpenAIModelsClient = (modelsListImpl) => {
+  const OpenAIClient = vi.fn().mockImplementation((options) => ({
+    options,
+    models: { list: modelsListImpl },
+  }));
+  return { OpenAIClient, modelsListImpl };
 };
-
-const assistantMessages = (parts) => ({
-  data: [
-    {
-      info: {
-        role: 'assistant',
-        finish: 'stop',
-      },
-      parts,
-    },
-  ],
-});
-
-const translate = (overrides) => translateWithOpenCode({
-  buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
-  getOpenCodeAuthHeaders: () => ({ authorization: 'Bearer test-token' }),
-  request: translationRequest,
-  pollIntervalMs: 0,
-  timeoutMs: 1,
-  sleepImpl: vi.fn(async () => {}),
-  ...overrides,
-});
 
 describe('chat translation backend', () => {
+  beforeEach(() => {
+    authMocks.readAuthFile.mockReturnValue({ anthropic: { key: 'test-key' } });
+    authMocks.readConfigLayers.mockReturnValue({
+      mergedConfig: {
+        provider: {
+          anthropic: { options: { baseURL: 'https://api.example.test/v1' } },
+        },
+      },
+    });
+  });
+
   it('builds a default prompt that preserves technical markdown content', () => {
     const prompt = buildChatTranslationPrompt({ targetLanguage: 'Vietnamese' });
 
@@ -122,6 +100,25 @@ describe('chat translation backend', () => {
     });
   });
 
+  it('validates translation requests with direct credentials and optional providerID', () => {
+    expect(validateChatTranslationRequest({
+      text: ' Hello ',
+      settings: {
+        enabled: true,
+        targetLanguage: 'Vietnamese',
+        apiKey: ' settings-key ',
+        baseURL: ' https://custom.example.test/v1 ',
+        modelID: ' custom-model ',
+      },
+    })).toMatchObject({
+      ok: true,
+      text: 'Hello',
+      targetLanguage: 'Vietnamese',
+      modelID: 'custom-model',
+      credentials: { apiKey: 'settings-key', baseURL: 'https://custom.example.test/v1' },
+    });
+  });
+
   it('rejects disabled, unconfigured, and oversized translation requests', () => {
     expect(validateChatTranslationRequest({ text: 'Hello', settings: { enabled: false } })).toMatchObject({
       ok: false,
@@ -143,8 +140,6 @@ describe('chat translation backend', () => {
     const translate = vi.fn();
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: { enabled: false } }),
-      buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
-      getOpenCodeAuthHeaders: () => ({}),
       translate,
     });
 
@@ -163,8 +158,6 @@ describe('chat translation backend', () => {
     const app = { post: (path, ...handlersForPath) => handlers.set(path, handlersForPath.at(-1)) };
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
-      buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
-      getOpenCodeAuthHeaders: () => ({}),
       translate: async () => '**Xin chào**',
     });
 
@@ -185,8 +178,6 @@ describe('chat translation backend', () => {
     registerCommonRequestMiddleware(app, { express });
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
-      buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
-      getOpenCodeAuthHeaders: () => ({}),
       express,
       translate,
     });
@@ -201,14 +192,69 @@ describe('chat translation backend', () => {
     expect(translate).toHaveBeenCalledOnce();
   });
 
+  it('fetches translation models with direct credentials', async () => {
+    const app = express();
+    const fetchModels = vi.fn(async ({ apiKey, baseURL }) => {
+      expect(apiKey).toBe('test-key');
+      expect(baseURL).toBe('https://custom.example.test/v1');
+      return [{ id: 'model-a', owned_by: 'owner-a' }];
+    });
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
+      express,
+      fetchModels,
+    });
+
+    const response = await request(app)
+      .post('/api/chat/translation/models')
+      .send({ apiKey: 'test-key', baseURL: 'https://custom.example.test/v1' });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ models: [{ id: 'model-a', owned_by: 'owner-a' }] });
+  });
+
+  it('rejects model fetches with missing credentials', async () => {
+    const app = express();
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
+      express,
+    });
+
+    const response = await request(app)
+      .post('/api/chat/translation/models')
+      .send({ apiKey: 'test-key' });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: 'API key and base URL are required.', code: 'missing_credentials' });
+  });
+
+  it('returns models_fetch_failed when model listing fails', async () => {
+    const app = express();
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
+      express,
+      fetchModels: vi.fn(async () => {
+        throw new Error('provider unavailable');
+      }),
+    });
+
+    const response = await request(app)
+      .post('/api/chat/translation/models')
+      .send({ apiKey: 'test-key', baseURL: 'https://custom.example.test/v1' });
+
+    expect(response.status).toBe(502);
+    expect(response.body).toEqual({ error: 'provider unavailable', code: 'models_fetch_failed' });
+  });
+
   it('rejects oversized translation bodies before invoking translation', async () => {
     const app = express();
     const translate = vi.fn(async () => 'xin chao');
 
     registerChatTranslationRoutes(app, {
       readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
-      buildOpenCodeUrl: (path) => `http://127.0.0.1:4096${path}`,
-      getOpenCodeAuthHeaders: () => ({}),
       express,
       translate,
     });
@@ -271,167 +317,139 @@ describe('chat translation backend', () => {
     nextRelease();
   });
 
-  it('creates a temporary session, prompts through prompt_async, polls messages, and returns assistant text', async () => {
-    const fetchImpl = createOpenCodeFetch({
-      messages: assistantMessages([{ type: 'text', text: '**Xin chào**' }]),
+  it('calls the OpenAI-compatible chat completions API and returns assistant text', async () => {
+    const { OpenAIClient, createImpl } = createOpenAIClient();
+
+    await expect(translateWithOpenAI({ request: translationRequest, OpenAIClient })).resolves.toBe('**Xin chào**');
+
+    expect(OpenAIClient).toHaveBeenCalledWith({
+      apiKey: 'test-key',
+      baseURL: 'https://api.example.test/v1',
+      defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
     });
-
-    await expect(translate({ fetchImpl })).resolves.toBe('**Xin chào**');
-
-    const requestedUrls = fetchImpl.mock.calls.map(([url]) => url);
-    expect(requestedUrls).toEqual([
-      'http://127.0.0.1:4096/session',
-      'http://127.0.0.1:4096/session/translation-session/prompt_async',
-      'http://127.0.0.1:4096/session/translation-session/message?limit=10',
-      'http://127.0.0.1:4096/session/translation-session',
-    ]);
-    expect(requestedUrls.some((url) => url.includes('/experimental/translation'))).toBe(false);
-
-    const [, sessionOptions] = fetchImpl.mock.calls[0];
-    expectSessionCreationRequest(sessionOptions);
-
-    const [, promptOptions] = fetchImpl.mock.calls[1];
-    expect(promptOptions).toMatchObject({
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        authorization: 'Bearer test-token',
-      },
-    });
-    expect(JSON.parse(promptOptions.body)).toEqual({
-      model: {
-        providerID: 'anthropic',
-        modelID: 'claude-sonnet-4',
-      },
-      parts: [
-        {
-          type: 'text',
-          text: 'Translate to Vietnamese.\n\nTarget language: Vietnamese\n\nSource markdown:\n**Hello**',
-        },
+    expect(createImpl).toHaveBeenCalledWith({
+      model: 'claude-sonnet-4',
+      messages: [
+        { role: 'system', content: 'Translate to Vietnamese.\n\nTarget language: Vietnamese' },
+        { role: 'user', content: '**Hello**' },
       ],
     });
   });
 
-  it('deletes the temporary session after success', async () => {
-    const fetchImpl = createOpenCodeFetch({
-      messages: assistantMessages([{ type: 'text', text: 'Xin chào' }]),
-    });
+  it('uses settings-stored credentials for OpenAI-compatible chat completions', async () => {
+    authMocks.readAuthFile.mockClear();
+    const { OpenAIClient } = createOpenAIClient();
 
-    await translate({ fetchImpl });
-
-    expect(fetchImpl).toHaveBeenLastCalledWith(
-      'http://127.0.0.1:4096/session/translation-session',
-      expect.objectContaining({ method: 'DELETE' })
-    );
-  });
-
-  it('tolerates cleanup deletion failure after a successful translation', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const fetchImpl = vi.fn(async (url, options = {}) => {
-      const path = new URL(url).pathname;
-      if (path === '/session' && options.method === 'POST') {
-        return jsonResponse({ id: 'translation-session' });
-      }
-      if (path === '/session/translation-session/prompt_async' && options.method === 'POST') {
-        return jsonResponse({ ok: true });
-      }
-      if (path === '/session/translation-session/message' && options.method === 'GET') {
-        return jsonResponse(assistantMessages([{ type: 'text', text: 'Xin chào' }]));
-      }
-      if (path === '/session/translation-session' && options.method === 'DELETE') {
-        throw new Error('delete failed');
-      }
-      throw new Error(`Unexpected request: ${options.method || 'GET'} ${url}`);
-    });
-
-    await expect(translate({ fetchImpl })).resolves.toBe('Xin chào');
-    expect(fetchImpl).toHaveBeenLastCalledWith(
-      'http://127.0.0.1:4096/session/translation-session',
-      expect.objectContaining({ method: 'DELETE' })
-    );
-    expect(warn).toHaveBeenCalledWith('[ChatTranslation] Session cleanup failed:', 'delete failed');
-    warn.mockRestore();
-  });
-
-  it('attempts cleanup after prompt failure once a session exists', async () => {
-    const fetchImpl = vi.fn(async (url, options = {}) => {
-      const path = new URL(url).pathname;
-      if (path === '/session' && options.method === 'POST') {
-        return jsonResponse({ id: 'translation-session' });
-      }
-      if (path === '/session/translation-session/prompt_async' && options.method === 'POST') {
-        return jsonResponse('prompt rejected', { ok: false, status: 500 });
-      }
-      if (path === '/session/translation-session' && options.method === 'DELETE') {
-        return jsonResponse({ ok: true });
-      }
-      throw new Error(`Unexpected request: ${options.method || 'GET'} ${url}`);
-    });
-
-    await expect(translate({ fetchImpl })).rejects.toThrow('OpenCode translation prompt submission failed (500): prompt rejected');
-    expect(fetchImpl).toHaveBeenLastCalledWith(
-      'http://127.0.0.1:4096/session/translation-session',
-      expect.objectContaining({ method: 'DELETE' })
-    );
-  });
-
-  it('attempts cleanup after poll failure once a session exists', async () => {
-    const fetchImpl = vi.fn(async (url, options = {}) => {
-      const path = new URL(url).pathname;
-      if (path === '/session' && options.method === 'POST') {
-        return jsonResponse({ id: 'translation-session' });
-      }
-      if (path === '/session/translation-session/prompt_async' && options.method === 'POST') {
-        return jsonResponse({ ok: true });
-      }
-      if (path === '/session/translation-session/message' && options.method === 'GET') {
-        return jsonResponse('poll failed', { ok: false, status: 503 });
-      }
-      if (path === '/session/translation-session' && options.method === 'DELETE') {
-        return jsonResponse({ ok: true });
-      }
-      throw new Error(`Unexpected request: ${options.method || 'GET'} ${url}`);
-    });
-
-    await expect(translate({ fetchImpl })).rejects.toThrow('OpenCode translation message polling failed (503): poll failed');
-    expect(fetchImpl).toHaveBeenLastCalledWith(
-      'http://127.0.0.1:4096/session/translation-session',
-      expect.objectContaining({ method: 'DELETE' })
-    );
-  });
-
-  it('errors deterministically when assistant completes with empty text', async () => {
-    const fetchImpl = createOpenCodeFetch({
-      messages: assistantMessages([{ type: 'text', text: '   ' }]),
-    });
-
-    await expect(translate({ fetchImpl })).rejects.toThrow('OpenCode translation returned an empty response.');
-    expect(fetchImpl).toHaveBeenLastCalledWith(
-      'http://127.0.0.1:4096/session/translation-session',
-      expect.objectContaining({ method: 'DELETE' })
-    );
-  });
-
-  it('errors deterministically when assistant text never finalizes', async () => {
-    let pollCount = 0;
-    const fetchImpl = createOpenCodeFetch({
-      messages: () => {
-        pollCount += 1;
-        return { data: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'draft' }] }] };
+    await expect(translateWithOpenAI({
+      request: {
+        ...translationRequest,
+        providerID: undefined,
+        credentials: { apiKey: 'settings-key', baseURL: 'https://custom.example.test/v1' },
       },
+      OpenAIClient,
+    })).resolves.toBe('**Xin chào**');
+
+    expect(OpenAIClient).toHaveBeenCalledWith({
+      apiKey: 'settings-key',
+      baseURL: 'https://custom.example.test/v1',
+      defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
+    });
+    expect(authMocks.readAuthFile).not.toHaveBeenCalled();
+  });
+
+  it('falls back to auth.json when direct credentials are incomplete', async () => {
+    const { OpenAIClient } = createOpenAIClient();
+
+    await expect(translateWithOpenAI({
+      request: {
+        ...translationRequest,
+        credentials: { apiKey: 'settings-key' },
+      },
+      OpenAIClient,
+    })).resolves.toBe('**Xin chào**');
+
+    expect(OpenAIClient).toHaveBeenCalledWith({
+      apiKey: 'test-key',
+      baseURL: 'https://api.example.test/v1',
+      defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
+    });
+  });
+
+  it('lists OpenAI-compatible models and caps the response at 500 entries', async () => {
+    const models = Array.from({ length: 501 }, (_, index) => ({ id: `model-${index}`, owned_by: `owner-${index}` }));
+    const modelsListImpl = vi.fn(async () => models);
+    const { OpenAIClient } = createOpenAIModelsClient(modelsListImpl);
+
+    await expect(fetchChatTranslationModels({ apiKey: ' test-key ', baseURL: ' https://custom.example.test/v1 ', OpenAIClient })).resolves.toHaveLength(500);
+
+    expect(OpenAIClient).toHaveBeenCalledWith({
+      apiKey: 'test-key',
+      baseURL: 'https://custom.example.test/v1',
+      defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
+    });
+    expect(modelsListImpl).toHaveBeenCalledOnce();
+  });
+
+  it('constructs the OpenAI-compatible client without baseURL when none is configured', async () => {
+    authMocks.readConfigLayers.mockReturnValue({ mergedConfig: { provider: { anthropic: { options: {} } } } });
+    const { OpenAIClient } = createOpenAIClient();
+
+    await expect(translateWithOpenAI({ request: translationRequest, OpenAIClient })).resolves.toBe('**Xin chào**');
+
+    expect(OpenAIClient).toHaveBeenCalledWith({
+      apiKey: 'test-key',
+      defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
+    });
+  });
+
+  it('rejects missing provider credentials with provider_not_configured', async () => {
+    authMocks.readAuthFile.mockReturnValue({});
+    const { OpenAIClient } = createOpenAIClient();
+
+    await expect(translateWithOpenAI({ request: translationRequest, OpenAIClient })).rejects.toMatchObject({
+      status: 400,
+      code: 'provider_not_configured',
+    });
+    expect(OpenAIClient).not.toHaveBeenCalled();
+  });
+
+  it('returns provider_not_configured from the route when credentials are missing', async () => {
+    authMocks.readAuthFile.mockReturnValue({});
+    const app = express();
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
+      express,
     });
 
-    await expect(translate({
-      fetchImpl,
-      timeoutMs: 0,
-      pollIntervalMs: 0,
-      sleepImpl: vi.fn(async () => {}),
-    })).rejects.toThrow('OpenCode translation timed out after 0ms.');
-    expect(pollCount).toBeGreaterThan(0);
-    expect(fetchImpl).toHaveBeenLastCalledWith(
-      'http://127.0.0.1:4096/session/translation-session',
-      expect.objectContaining({ method: 'DELETE' })
-    );
+    const response = await request(app)
+      .post('/api/chat/translate')
+      .send({ text: 'hello' });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: 'Translation provider anthropic is not configured.',
+      code: 'provider_not_configured',
+    });
+  });
+
+  it('returns translation_failed from the route when the provider API fails', async () => {
+    const translate = vi.fn(async () => {
+      throw new Error('provider unavailable');
+    });
+    const app = express();
+
+    registerChatTranslationRoutes(app, {
+      readSettingsFromDiskMigrated: async () => ({ chatTranslation: enabledSettings }),
+      express,
+      translate,
+    });
+
+    const response = await request(app)
+      .post('/api/chat/translate')
+      .send({ text: 'hello' });
+
+    expect(response.status).toBe(502);
+    expect(response.body).toEqual({ error: 'provider unavailable', code: 'translation_failed' });
   });
 });

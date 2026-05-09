@@ -1,9 +1,25 @@
+import OpenAI from 'openai';
+import { readAuthFile } from '../opencode/auth.js';
+import { readConfigLayers } from '../opencode/shared.js';
+import { getAuthEntry, normalizeAuthEntry } from '../quota/utils/index.js';
+
 export const CHAT_TRANSLATION_TEXT_MAX_LENGTH = 80_000;
 export const CHAT_TRANSLATION_PROMPT_MAX_LENGTH = 20_000;
 export const CHAT_TRANSLATION_FIELD_MAX_LENGTH = 160;
-export const CHAT_TRANSLATION_POLL_INTERVAL_MS = 1_000;
-export const CHAT_TRANSLATION_TIMEOUT_MS = 120_000;
+export const CHAT_TRANSLATION_API_KEY_MAX_LENGTH = 256;
+export const CHAT_TRANSLATION_BASE_URL_MAX_LENGTH = 512;
+export const CHAT_TRANSLATION_MODELS_LIMIT = 500;
 export const CHAT_TRANSLATION_CONCURRENCY_LIMIT = 4;
+
+export const CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (compatible; OpenChamber/1.0)',
+  'x-stainless-lang': null,
+  'x-stainless-os': null,
+  'x-stainless-arch': null,
+  'x-stainless-runtime': null,
+  'x-stainless-runtime-version': null,
+  'x-stainless-package-version': null,
+};
 
 export const DEFAULT_CHAT_TRANSLATION_PROMPT = `You are a technical translation engine. Translate only natural-language prose to the requested target language.
 Preserve markdown structure exactly, including headings, lists, tables, blockquotes, links, and emphasis.
@@ -46,8 +62,16 @@ export const validateChatTranslationRequest = ({ text, settings }) => {
 
   const providerID = normalizeText(settings.providerID, CHAT_TRANSLATION_FIELD_MAX_LENGTH);
   const modelID = normalizeText(settings.modelID, CHAT_TRANSLATION_FIELD_MAX_LENGTH);
-  if (!providerID || !modelID) {
-    return { ok: false, status: 400, code: 'missing_model', message: 'Translation provider and model are required.' };
+  const apiKey = normalizeText(settings.apiKey, CHAT_TRANSLATION_API_KEY_MAX_LENGTH);
+  const baseURL = normalizeText(settings.baseURL, CHAT_TRANSLATION_BASE_URL_MAX_LENGTH);
+  const directCredentials = apiKey && baseURL ? { apiKey, baseURL } : null;
+
+  if (!modelID) {
+    return { ok: false, status: 400, code: 'missing_model', message: 'Translation model is required.' };
+  }
+
+  if (!providerID && !directCredentials) {
+    return { ok: false, status: 400, code: 'missing_model', message: 'Translation provider is required when direct credentials are not configured.' };
   }
 
   const normalizedText = normalizeText(text, CHAT_TRANSLATION_TEXT_MAX_LENGTH);
@@ -63,14 +87,12 @@ export const validateChatTranslationRequest = ({ text, settings }) => {
     ok: true,
     text: normalizedText,
     targetLanguage,
-    providerID,
+    ...(providerID ? { providerID } : {}),
     modelID,
+    ...(directCredentials ? { credentials: directCredentials } : {}),
     systemPrompt: buildChatTranslationPrompt({ targetLanguage, systemPrompt: settings.systemPrompt }),
   };
 };
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const CHAT_TRANSLATION_SESSION_TITLE = 'Chat Translation';
 
 export const createCountingSemaphore = (limit) => {
   let active = 0;
@@ -104,150 +126,91 @@ export const createCountingSemaphore = (limit) => {
 
 const translationSemaphore = createCountingSemaphore(CHAT_TRANSLATION_CONCURRENCY_LIMIT);
 
-const buildOpenCodeRequestHeaders = (getOpenCodeAuthHeaders) => ({
-  'Content-Type': 'application/json',
-  Accept: 'application/json',
-  ...(getOpenCodeAuthHeaders ? getOpenCodeAuthHeaders() : {}),
-});
+export class ChatTranslationProviderNotConfiguredError extends Error {
+  constructor(providerID) {
+    super(`Translation provider ${providerID} is not configured.`);
+    this.name = 'ChatTranslationProviderNotConfiguredError';
+    this.status = 400;
+    this.code = 'provider_not_configured';
+  }
+}
 
-const parseOpenCodeJsonResponse = async (response, action) => {
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`OpenCode translation ${action} failed (${response.status})${body ? `: ${body}` : ''}`);
+export const resolveChatTranslationProviderCredentials = (providerID, settings) => {
+  const settingsApiKey = normalizeText(settings?.apiKey, CHAT_TRANSLATION_API_KEY_MAX_LENGTH);
+  const settingsBaseURL = normalizeText(settings?.baseURL, CHAT_TRANSLATION_BASE_URL_MAX_LENGTH);
+  if (settingsApiKey && settingsBaseURL) {
+    return { apiKey: settingsApiKey, baseURL: settingsBaseURL };
   }
 
-  return response.json().catch(() => null);
-};
+  const auth = readAuthFile();
+  const entry = normalizeAuthEntry(getAuthEntry(auth, [providerID]));
+  const apiKey = normalizeText(entry?.key ?? entry?.token ?? entry?.access, CHAT_TRANSLATION_PROMPT_MAX_LENGTH);
 
-const extractSessionID = (payload) => {
-  const id = payload?.id ?? payload?.data?.id ?? payload?.session?.id;
-  return typeof id === 'string' && id.trim() ? id.trim() : '';
-};
-
-const extractTextParts = (parts) => {
-  if (!Array.isArray(parts)) {
-    return '';
+  if (!apiKey) {
+    throw new ChatTranslationProviderNotConfiguredError(providerID);
   }
 
-  return parts
-    .map((part) => typeof part?.text === 'string' ? part.text : '')
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+  const layers = readConfigLayers();
+  const configuredBaseURL = layers.mergedConfig?.provider?.[providerID]?.options?.baseURL;
+  const baseURL = normalizeText(configuredBaseURL, CHAT_TRANSLATION_PROMPT_MAX_LENGTH);
+
+  return {
+    apiKey,
+    ...(baseURL ? { baseURL } : {}),
+  };
 };
 
-const getAssistantMessages = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.data)) return payload.data;
-  if (Array.isArray(payload?.messages)) return payload.messages;
-  if (Array.isArray(payload?.message)) return payload.message;
-  return [];
-};
-
-const extractFinishedAssistantText = (payload) => {
-  const message = getAssistantMessages(payload).find((candidate) => {
-    const info = candidate?.info ?? candidate;
-    return info?.role === 'assistant' && info?.finish === 'stop';
+export const translateWithOpenAI = async ({ request, OpenAIClient = OpenAI }) => {
+  const credentials = resolveChatTranslationProviderCredentials(request.providerID, request.credentials);
+  const client = new OpenAIClient({
+    ...credentials,
+    defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
   });
+  const completion = await client.chat.completions.create({
+    model: request.modelID,
+    messages: [
+      { role: 'system', content: request.systemPrompt },
+      { role: 'user', content: request.text },
+    ],
+  });
+  const translatedText = completion?.choices?.[0]?.message?.content?.trim();
 
-  if (!message) {
-    return null;
+  if (!translatedText) {
+    throw new Error('OpenAI-compatible translation returned an empty response.');
   }
 
-  return extractTextParts(message.parts ?? message.message?.parts ?? message.data?.parts);
+  return translatedText;
 };
 
-const buildTranslationUserPrompt = (request) => `${request.systemPrompt}\n\nSource markdown:\n${request.text}`;
-
-const createTemporarySession = async ({ fetchImpl, buildOpenCodeUrl, headers }) => {
-  const response = await fetchImpl(buildOpenCodeUrl('/session'), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ title: CHAT_TRANSLATION_SESSION_TITLE }),
-  });
-  const payload = await parseOpenCodeJsonResponse(response, 'session creation');
-  const sessionID = extractSessionID(payload);
-  if (!sessionID) {
-    throw new Error('OpenCode translation session creation returned no session id.');
+export const fetchChatTranslationModels = async ({ apiKey, baseURL, OpenAIClient = OpenAI }) => {
+  const normalizedApiKey = normalizeText(apiKey, CHAT_TRANSLATION_API_KEY_MAX_LENGTH);
+  const normalizedBaseURL = normalizeText(baseURL, CHAT_TRANSLATION_BASE_URL_MAX_LENGTH);
+  if (!normalizedApiKey || !normalizedBaseURL) {
+    const error = new Error('API key and base URL are required.');
+    error.status = 400;
+    error.code = 'missing_credentials';
+    throw error;
   }
-  return sessionID;
-};
 
-const sendTranslationPrompt = async ({ fetchImpl, buildOpenCodeUrl, headers, sessionID, request }) => {
-  const response = await fetchImpl(buildOpenCodeUrl(`/session/${encodeURIComponent(sessionID)}/prompt_async`), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: {
-        providerID: request.providerID,
-        modelID: request.modelID,
-      },
-      parts: [
-        {
-          type: 'text',
-          text: buildTranslationUserPrompt(request),
-        },
-      ],
-    }),
+  const client = new OpenAIClient({
+    apiKey: normalizedApiKey,
+    baseURL: normalizedBaseURL,
+    defaultHeaders: CHAT_TRANSLATION_OPENAI_DEFAULT_HEADERS,
   });
+  const page = await client.models.list();
+  const models = [];
 
-  await parseOpenCodeJsonResponse(response, 'prompt submission');
-};
-
-const pollTranslatedText = async ({ fetchImpl, buildOpenCodeUrl, headers, sessionID, timeoutMs, pollIntervalMs, sleepImpl }) => {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    const response = await fetchImpl(buildOpenCodeUrl(`/session/${encodeURIComponent(sessionID)}/message?limit=10`), {
-      method: 'GET',
-      headers,
-    });
-    const payload = await parseOpenCodeJsonResponse(response, 'message polling');
-    const translatedText = extractFinishedAssistantText(payload);
-
-    if (translatedText !== null) {
-      if (!translatedText) {
-        throw new Error('OpenCode translation returned an empty response.');
-      }
-      return translatedText;
+  for await (const model of page) {
+    if (typeof model?.id !== 'string' || model.id.trim().length === 0) {
+      continue;
     }
-
-    await sleepImpl(pollIntervalMs);
-  }
-
-  throw new Error(`OpenCode translation timed out after ${timeoutMs}ms.`);
-};
-
-const deleteTemporarySession = async ({ fetchImpl, buildOpenCodeUrl, headers, sessionID }) => {
-  await fetchImpl(buildOpenCodeUrl(`/session/${encodeURIComponent(sessionID)}`), {
-    method: 'DELETE',
-    headers,
-  });
-};
-
-export const translateWithOpenCode = async ({
-  fetchImpl = fetch,
-  buildOpenCodeUrl,
-  getOpenCodeAuthHeaders,
-  request,
-  timeoutMs = CHAT_TRANSLATION_TIMEOUT_MS,
-  pollIntervalMs = CHAT_TRANSLATION_POLL_INTERVAL_MS,
-  sleepImpl = sleep,
-}) => {
-  const headers = buildOpenCodeRequestHeaders(getOpenCodeAuthHeaders);
-  let sessionID = '';
-
-  try {
-    sessionID = await createTemporarySession({ fetchImpl, buildOpenCodeUrl, headers });
-    await sendTranslationPrompt({ fetchImpl, buildOpenCodeUrl, headers, sessionID, request });
-    return await pollTranslatedText({ fetchImpl, buildOpenCodeUrl, headers, sessionID, timeoutMs, pollIntervalMs, sleepImpl });
-  } finally {
-    if (sessionID) {
-      await deleteTemporarySession({ fetchImpl, buildOpenCodeUrl, headers, sessionID }).catch((err) => {
-        console.warn('[ChatTranslation] Session cleanup failed:', err?.message);
-      });
+    models.push({ id: model.id, owned_by: typeof model.owned_by === 'string' ? model.owned_by : undefined });
+    if (models.length >= CHAT_TRANSLATION_MODELS_LIMIT) {
+      break;
     }
   }
+
+  return models;
 };
 
 export const extractTranslatedText = (payload) => {
@@ -266,12 +229,26 @@ export const extractTranslatedText = (payload) => {
 export const registerChatTranslationRoutes = (app, dependencies) => {
   const {
     readSettingsFromDiskMigrated,
-    buildOpenCodeUrl,
-    getOpenCodeAuthHeaders,
-    translate = translateWithOpenCode,
+    translate = translateWithOpenAI,
+    fetchModels = fetchChatTranslationModels,
   } = dependencies;
 
   const jsonParser = dependencies.express?.json({ limit: '200kb' });
+  app.post('/api/chat/translation/models', ...[jsonParser, async (req, res) => {
+    try {
+      const models = await fetchModels({
+        apiKey: req.body?.apiKey,
+        baseURL: req.body?.baseURL,
+      });
+      return res.json({ models });
+    } catch (error) {
+      if (error?.code === 'missing_credentials') {
+        return res.status(400).json({ error: error.message, code: error.code });
+      }
+      return res.status(502).json({ error: error?.message || 'Failed to fetch translation models', code: 'models_fetch_failed' });
+    }
+  }].filter(Boolean));
+
   const handlers = [jsonParser, async (req, res) => {
     try {
       const settings = await readSettingsFromDiskMigrated();
@@ -288,8 +265,6 @@ export const registerChatTranslationRoutes = (app, dependencies) => {
       let translatedText;
       try {
         translatedText = await translate({
-          buildOpenCodeUrl,
-          getOpenCodeAuthHeaders,
           request: validation,
         });
       } finally {
@@ -299,6 +274,9 @@ export const registerChatTranslationRoutes = (app, dependencies) => {
       return res.json({ translatedText });
     } catch (error) {
       console.error('[ChatTranslation] Translation failed:', error);
+      if (error?.code === 'provider_not_configured') {
+        return res.status(400).json({ error: error.message, code: error.code });
+      }
       return res.status(502).json({ error: error?.message || 'Translation failed', code: 'translation_failed' });
     }
   }].filter(Boolean);

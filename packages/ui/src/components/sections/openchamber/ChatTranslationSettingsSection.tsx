@@ -1,5 +1,5 @@
 import React from 'react';
-import { ModelSelector } from '@/components/sections/agents/ModelSelector';
+import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
@@ -22,11 +22,24 @@ const LANGUAGE_OPTIONS: Array<{ value: string; labelKey: Parameters<ReturnType<t
 
 const EMPTY_TRANSLATION: ChatTranslationSettings = { enabled: false, autoTranslate: false };
 
+const DEFAULT_CHAT_TRANSLATION_PROMPT = `You are a technical translation engine. Translate only natural-language prose to the requested target language.
+Preserve markdown structure exactly, including headings, lists, tables, blockquotes, links, and emphasis.
+Do not translate or modify fenced code blocks, inline code, commands, URLs, file paths, environment variables, package names, class names, function names, identifiers, logs, diffs, or terminal output.
+Return only the translated markdown with no explanations, prefaces, or suffixes.`;
+
+type TranslationModel = {
+  id: string;
+  owned_by?: string;
+};
+
 export const ChatTranslationSettingsSection: React.FC = () => {
   const { t } = useI18n();
   const [settings, setSettings] = React.useState<ChatTranslationSettings>(EMPTY_TRANSLATION);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  const [models, setModels] = React.useState<TranslationModel[]>([]);
+  const [modelsLoading, setModelsLoading] = React.useState(false);
+  const [modelsError, setModelsError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -59,10 +72,39 @@ export const ChatTranslationSettingsSection: React.FC = () => {
   const targetLanguage = settings.targetLanguage || 'Vietnamese';
   const autoTranslateEnabled = settings.enabled === true && (settings.autoTranslate ?? true);
   const missingLanguage = settings.enabled && targetLanguage === 'custom' && !settings.customTargetLanguage?.trim();
-  const missingModel = settings.enabled && (!settings.providerID || !settings.modelID);
+  const hasDirectCredentials = Boolean(settings.apiKey?.trim() && settings.baseURL?.trim());
+  const missingModel = settings.enabled && (!settings.modelID || (!settings.providerID && !hasDirectCredentials));
+  const canFetchModels = hasDirectCredentials && !modelsLoading;
   const enabledStatus = autoTranslateEnabled
     ? t('settings.chat.translation.status.enabledAuto')
     : t('settings.chat.translation.status.enabledManual');
+
+  const fetchModels = async () => {
+    if (!settings.apiKey?.trim() || !settings.baseURL?.trim()) {
+      setModelsError(t('settings.chat.translation.models.missingCredentials'));
+      return;
+    }
+
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const response = await fetch('/api/chat/translation/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ apiKey: settings.apiKey, baseURL: settings.baseURL }),
+      });
+      const payload = await response.json().catch(() => null) as { models?: TranslationModel[]; error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error || response.statusText);
+      }
+      setModels(Array.isArray(payload?.models) ? payload.models.filter((model) => typeof model.id === 'string' && model.id.length > 0) : []);
+    } catch (fetchError) {
+      const message = fetchError instanceof Error && fetchError.message ? fetchError.message : t('settings.chat.translation.models.fetchError');
+      setModelsError(message);
+    } finally {
+      setModelsLoading(false);
+    }
+  };
 
   return (
     <section className="space-y-4" aria-labelledby="chat-translation-title">
@@ -108,6 +150,16 @@ export const ChatTranslationSettingsSection: React.FC = () => {
 
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="space-y-2">
+          <span className="text-sm font-medium text-[var(--surface-foreground)]">{t('settings.chat.translation.apiKey.label')}</span>
+          <Input type="password" value={settings.apiKey ?? ''} onChange={(event) => persist({ apiKey: event.target.value || undefined })} placeholder={t('settings.chat.translation.apiKey.placeholder')} aria-label={t('settings.chat.translation.apiKey.aria')} />
+        </label>
+
+        <label className="space-y-2">
+          <span className="text-sm font-medium text-[var(--surface-foreground)]">{t('settings.chat.translation.baseURL.label')}</span>
+          <Input value={settings.baseURL ?? ''} onChange={(event) => persist({ baseURL: event.target.value || undefined })} placeholder={t('settings.chat.translation.baseURL.placeholder')} aria-label={t('settings.chat.translation.baseURL.aria')} />
+        </label>
+
+        <label className="space-y-2">
           <span className="text-sm font-medium text-[var(--surface-foreground)]">{t('settings.chat.translation.targetLanguage.label')}</span>
           <Select value={targetLanguage} onValueChange={(targetLanguage) => persist({ targetLanguage })}>
             <SelectTrigger aria-label={t('settings.chat.translation.targetLanguage.aria')}>
@@ -125,14 +177,32 @@ export const ChatTranslationSettingsSection: React.FC = () => {
         </label>
       </div>
 
-      <label className="space-y-2 block">
-        <span className="text-sm font-medium text-[var(--surface-foreground)]">{t('settings.chat.translation.model.label')}</span>
-        <ModelSelector providerId={settings.providerID ?? ''} modelId={settings.modelID ?? ''} onChange={(providerID, modelID) => persist({ providerID, modelID })} placeholder={t('settings.chat.translation.model.placeholder')} />
-      </label>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <label className="flex-1 space-y-2">
+            <span className="text-sm font-medium text-[var(--surface-foreground)]">{t('settings.chat.translation.model.label')}</span>
+            <Input value={settings.modelID ?? ''} onChange={(event) => persist({ modelID: event.target.value })} placeholder={t('settings.chat.translation.model.placeholder')} aria-label={t('settings.chat.translation.model.manualAria')} />
+          </label>
+          <Button type="button" variant="outline" size="sm" disabled={!canFetchModels} onClick={() => void fetchModels()} aria-label={t('settings.chat.translation.models.fetchAria')} className="mt-7">
+            {modelsLoading ? t('settings.chat.translation.models.fetching') : t('settings.chat.translation.models.fetch')}
+          </Button>
+        </div>
+        {models.length > 0 ? (
+          <Select value={settings.modelID ?? ''} onValueChange={(modelID) => persist({ modelID })}>
+            <SelectTrigger aria-label={t('settings.chat.translation.models.selectAria')}>
+              <SelectValue placeholder={t('settings.chat.translation.models.selectPlaceholder')} />
+            </SelectTrigger>
+            <SelectContent>
+              {models.map((model) => <SelectItem key={model.id} value={model.id}>{model.id}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        ) : null}
+        {modelsError ? <p className="text-xs text-[var(--status-error)]">{modelsError}</p> : null}
+      </div>
 
       <label className="space-y-2 block">
         <span className="text-sm font-medium text-[var(--surface-foreground)]">{t('settings.chat.translation.systemPrompt.label')}</span>
-        <Textarea value={settings.systemPrompt ?? ''} onChange={(event) => persist({ systemPrompt: event.target.value })} placeholder={t('settings.chat.translation.systemPrompt.placeholder')} aria-label={t('settings.chat.translation.systemPrompt.aria')} />
+        <Textarea value={settings.systemPrompt || DEFAULT_CHAT_TRANSLATION_PROMPT} onChange={(event) => persist({ systemPrompt: event.target.value })} placeholder={t('settings.chat.translation.systemPrompt.placeholder')} aria-label={t('settings.chat.translation.systemPrompt.aria')} />
       </label>
 
       <div className="text-xs text-[var(--surface-muted-foreground)]" role="status">
